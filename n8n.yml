@@ -1,0 +1,200 @@
+volumes:
+  n8n-app-data:        # n8n App
+  n8n-db-data:         # n8n DB
+  n8n-redis-data:      # n8n redis
+
+networks:
+  dokploy-network:
+    external: true
+
+x-n8n-worker-common-service: &n8n-worker-common-service
+  image: n8nio/n8n:latest
+  pull_policy: always
+  restart: unless-stopped
+  command: worker
+  networks:
+    - dokploy-network
+  environment:
+    - NODE_ENV=production
+    - N8N_HOST=${N8N_HOST}
+    - N8N_PORT=${N8N_PORT}
+    - N8N_PROTOCOL=https
+    - EXECUTIONS_MODE=queue
+    - DB_TYPE=postgresdb
+    - DB_POSTGRESDB_HOST=postgres
+    - DB_POSTGRESDB_PORT=5432
+    - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+    - DB_POSTGRESDB_USER=${POSTGRES_USER}
+    - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+    - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+    - N8N_USER_MANAGEMENT_JWT_SECRET=${N8N_USER_MANAGEMENT_JWT_SECRET}
+    - N8N_SECURE_COOKIE=true
+    - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+    - N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+    - N8N_PROXY_HOPS=${PROXY_HOPS}
+    - WEBHOOK_URL=https://${N8N_HOST}/
+    - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+    - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+    - N8N_TRUST_PROXY=true
+    - QUEUE_BULL_REDIS_HOST=n8n-redis
+    - QUEUE_BULL_REDIS_PORT=6379
+    - EXECUTIONS_CONCURRENCY=8
+    # Task Runner
+    - N8N_RUNNERS_ENABLED=true
+    - N8N_RUNNERS_MODE=external
+    - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+    - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_SECRET}
+    - N8N_RUNNERS_MAX_CONCURRENCY=16
+    # Git
+    - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+    - NODES_EXCLUDE=[]
+  volumes:
+    - n8n-app-data:/home/node/.n8n
+  depends_on:
+    n8n-db:
+      condition: service_healthy
+    n8n-redis:
+      condition: service_healthy
+
+x-n8n-runner-common-service: &n8n-runner-common-service
+  image: n8nio/runners:latest
+  pull_policy: always
+  restart: unless-stopped
+  networks:
+    - dokploy-network
+  environment: &n8n-runner-env
+    N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_SECRET}
+    N8N_ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+    N8N_RUNNERS_MAX_CONCURRENCY: 16
+
+services:
+  n8n-app:
+    image: n8nio/n8n:latest
+    pull_policy: always
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+    environment:
+      - NODE_ENV=production
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=https
+      # Database
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      # Configuration
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=true
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_USER_MANAGEMENT_JWT_SECRET=${N8N_USER_MANAGEMENT_JWT_SECRET}
+      - N8N_SECURE_COOKIE=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+      - N8N_PROXY_HOPS=${PROXY_HOPS}
+      - WEBHOOK_URL=https://${N8N_HOST}/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_TEMPLATES_ENABLED=true
+      - N8N_HIRING_BANNER_ENABLED=false
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      - N8N_TRUST_PROXY=true
+      # Logging
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=7
+      # Redis
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=n8n-redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      # Emails
+      - N8N_SMTP_HOST=${SMTP_HOST}
+      - N8N_SMTP_PORT=${SMTP_PORT}
+      - N8N_SMTP_USER=${SMTP_USER}
+      - N8N_SMTP_PASS=${SMTP_PASS}
+      - N8N_SMTP_SSL=true
+      # Git
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+      - NODES_EXCLUDE=[]
+    volumes:
+      - n8n-app-data:/home/node/.n8n
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --spider -q http://localhost:5678/healthz || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      n8n-db:
+        condition: service_healthy
+      n8n-redis:
+        condition: service_healthy
+      n8n-worker-1:
+        condition: service_started
+
+  n8n-worker-1:
+    <<: *n8n-worker-common-service
+
+  n8n-worker-2:
+    <<: *n8n-worker-common-service
+    depends_on:
+      n8n-worker-1:
+        condition: service_started
+      n8n-db:
+        condition: service_healthy
+      n8n-redis:
+        condition: service_healthy
+
+  n8n-runner-1:
+    <<: *n8n-runner-common-service
+    environment:
+      <<: *n8n-runner-env
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n-worker-1:5679
+    depends_on:
+      n8n-worker-1:
+        condition: service_started
+
+  n8n-runner-2:
+    <<: *n8n-runner-common-service
+    environment:
+      <<: *n8n-runner-env
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n-worker-2:5679
+    depends_on:
+      n8n-worker-2:
+        condition: service_started
+
+  n8n-redis:
+    image: redis:7-alpine
+    pull_policy: always
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - n8n-redis-data:/data
+
+  n8n-db:
+    image: postgres:17-alpine
+    pull_policy: always
+    hostname: postgres
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - n8n-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
